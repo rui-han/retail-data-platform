@@ -1,1 +1,5 @@
+__pycache__/
+
+minio_data/
+
 ivy/
