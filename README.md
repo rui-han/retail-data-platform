@@ -1,123 +1,148 @@
+# Retail Data Platform — Olist
+
+A PySpark + MinIO pipeline that ingests the [Brazilian E-Commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) from Kaggle and processes it through a **Bronze → Silver → Gold** medallion architecture.
+
+---
+
 ## 1. Data Architecture
 
 ### Bronze layer (`s3a://clean/olist/bronze/*`)
 
-Raw-to-parquet ingestion, table-per-dataset:
+Raw-to-Parquet ingestion with explicit schemas, one table per dataset:
 
-- `customers`, `geolocation`, `order_items`, `order_payments`, `order_reviews`,
-  `orders`, `products`, `sellers`, `category_translation`
+`customers` · `geolocation` · `order_items` · `order_payments` · `order_reviews` · `orders` · `products` · `sellers` · `category_translation`
 
 ### Silver layer (`s3a://clean/olist/silver/*`)
 
-Conformed/staged datasets:
-
-- Dimensions:
-  - `dim_customers`
-  - `dim_sellers`
-  - `dim_products`
-  - `dim_geolocation`
-- Fact:
-  - `fct_order_items` (grain: `order_id + order_item_id`)
-- DQ staging:
-  - `stg_orders`
-  - `stg_orders_quarantine`
+| Table                   | Description                                     |
+| ----------------------- | ----------------------------------------------- |
+| `stg_orders`            | Validated, deduplicated orders (DQ gate output) |
+| `stg_orders_quarantine` | Rows that failed validation                     |
+| `dim_customers`         | Customer dimension                              |
+| `dim_sellers`           | Seller dimension                                |
+| `dim_products`          | Product dimension with English category names   |
+| `dim_geolocation`       | ZIP-level lat/lng averages                      |
+| `fct_order_items`       | Fact table — grain: `order_id + order_item_id`  |
 
 ### Gold layer (`s3a://mart/olist/gold/*`)
 
-Business-ready marts:
-
-- `mart_order_analytics` (wide analytical table)
-- `mart_daily_sales`
-- `mart_state_performance`
-- `mart_category_performance`
-- `mart_order_status_daily`
-
----
-
-## 2. Jobs and Responsibilities
-
-1. `jobs/bronze_ingest_olist.py`
-
-   - Ingest all raw CSVs into Bronze parquet datasets.
-
-2. `jobs/etl_orders.py`
-
-   - Standardize orders timestamps/strings.
-   - Validate primary key (`order_id`) and isolate invalid rows into quarantine.
-
-3. `jobs/silver_build_model.py`
-
-   - Build dimensions and core fact table.
-   - Join translations, aggregate payment/review attributes, derive delivery delay flag.
-
-4. `jobs/gold_build_marts.py`
-
-   - Build aggregated marts for daily sales, state-level performance, and category-level performance.
-
-5. `jobs/build_order_analytics_mart.py`
-
-   - Build a wide analytics mart for BI/exploration.
-
-6. `jobs/build_order_kpis.py`
-   - Build daily KPI mart by order status.
+| Table                       | Description                                      |
+| --------------------------- | ------------------------------------------------ |
+| `mart_order_analytics`      | Wide row-level table for BI / ad-hoc exploration |
+| `mart_daily_sales`          | Day-level GMV, freight, review score, delay rate |
+| `mart_state_performance`    | State-level GMV and KPIs                         |
+| `mart_category_performance` | Category-level GMV and KPIs                      |
+| `mart_order_status_daily`   | Daily KPIs broken out by order status            |
 
 ---
 
-## 3. How to Run
+## 2. Job Responsibilities
 
-### 3.1 Start infrastructure
+| Job                   | Path                   | Reads from                      | Writes to                                           |
+| --------------------- | ---------------------- | ------------------------------- | --------------------------------------------------- |
+| `bronze_ingest_olist` | `jobs/ingestion/`      | `raw/*` CSVs                    | `silver/bronze/*`                                   |
+| `etl_orders`          | `jobs/etl/`            | `bronze/orders`                 | `silver/stg_orders`, `silver/stg_orders_quarantine` |
+| `silver_build_model`  | `jobs/transformation/` | `bronze/*`, `silver/stg_orders` | `silver/dim_*`, `silver/fct_order_items`            |
+| `gold_build_marts`    | `jobs/transformation/` | `silver/*`                      | `gold/mart_*`                                       |
+
+> `gold_build_marts` consolidates all five gold marts in one job to avoid re-reading and re-joining silver tables multiple times.
+
+---
+
+## 3. Setup
+
+### 3.1 Configure credentials
+
+```bash
+cp .env.example .env
+# Edit .env — fill in S3_ACCESS_KEY, S3_SECRET_KEY, KAGGLE_USERNAME, KAGGLE_KEY
+```
+
+`.env` is git-ignored. **Never commit credentials.**
+
+### 3.2 Start infrastructure
 
 ```bash
 docker compose up -d
 ```
 
-### 3.2 Run full pipeline (recommended)
+The Spark container automatically loads `.env` via `env_file` in `docker-compose.yml`.
 
-#### Windows PowerShell
+### 3.3 (Optional) Download raw data from Kaggle
 
-```powershell
+```bash
+# Linux / macOS
+./scripts/run_ingest_olist.sh
+
+# Windows PowerShell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_ingest_olist.ps1
+```
+
+### 3.4 Run full pipeline
+
+```bash
+# Linux / macOS
+./scripts/run_olist_pipeline.sh
+
+# Windows PowerShell
 powershell -ExecutionPolicy Bypass -File .\scripts\run_olist_pipeline.ps1
 ```
 
-Optional parameters:
+Optional parameters (PowerShell):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_olist_pipeline.ps1 `
-  -Container spark `
-  -Master "local[*]" `
-  -Packages "org.apache.hadoop:hadoop-aws:3.3.4"
+.\scripts\run_olist_pipeline.ps1 -Container spark -Master "local[*]" -Packages "org.apache.hadoop:hadoop-aws:3.3.4"
 ```
 
-#### Linux / macOS / WSL
+### 3.5 Run a single job
 
 ```bash
-./scripts/run_olist_pipeline.sh
-```
-
-### 3.3 Run a single job (debug mode)
-
-```powershell
-docker exec spark /opt/spark/bin/spark-submit `
-  --master local[*] `
-  --packages org.apache.hadoop:hadoop-aws:3.3.4 `
-  jobs/etl_orders.py
+docker exec spark /opt/spark/bin/spark-submit \
+  --master local[*] \
+  --packages org.apache.hadoop:hadoop-aws:3.3.4 \
+  jobs/ingestion/bronze_ingest_olist.py
 ```
 
 ---
 
-## 4. Configuration
+## 4. Project Structure
 
-- `raw` bucket: source CSV files only
-- `clean` bucket: Bronze + Silver outputs
-- `mart` bucket: Gold/business marts
+```
+.
+├── core/
+│   ├── config.py          # StorageConfig, OLIST_DATASETS, OLIST_SCHEMAS
+│   ├── io.py              # read_raw_csv (explicit schema), write_parquet (with row logging)
+│   ├── logger.py          # shared logger
+│   └── spark_session.py   # SparkSession factory
+├── jobs/
+│   ├── ingestion/
+│   │   ├── ingest_olist.py          # Kaggle → MinIO raw upload
+│   │   └── bronze_ingest_olist.py   # raw CSV → bronze Parquet
+│   ├── etl/
+│   │   └── etl_orders.py            # DQ gate: valid → stg_orders, invalid → quarantine
+│   └── transformation/
+│       ├── silver_build_model.py    # dims + fct_order_items
+│       └── gold_build_marts.py      # all five gold marts (shared enriched cache)
+├── scripts/
+│   ├── run_olist_pipeline.ps1 / .sh
+│   └── run_ingest_olist.ps1 / .sh
+├── .env.example
+├── .gitignore
+└── docker-compose.yml
+```
 
-All storage/config settings are centralized in `core/config.py`.
+---
 
-Common environment variables:
+## 5. Environment Variables
 
-- `S3_ENDPOINT` (default: `http://minio:9000`)
-- `S3_ACCESS_KEY` (default: `admin`)
-- `S3_SECRET_KEY` (default: `password123`)
-- `RAW_BASE_PATH` (default: `s3a://raw`)
-- `CLEAN_BASE_PATH` (default: `s3a://clean/olist`)
-- `MART_BASE_PATH` (default: `s3a://mart/olist`)
+| Variable                       | Required         | Default             | Description                 |
+| ------------------------------ | ---------------- | ------------------- | --------------------------- |
+| `S3_ENDPOINT`                  | ✅               | —                   | MinIO / S3 endpoint URL     |
+| `S3_ACCESS_KEY`                | ✅               | —                   | Access key                  |
+| `S3_SECRET_KEY`                | ✅               | —                   | Secret key                  |
+| `KAGGLE_USERNAME`              | ✅ (ingest only) | —                   | Kaggle account username     |
+| `KAGGLE_KEY`                   | ✅ (ingest only) | —                   | Kaggle API key              |
+| `RAW_BASE_PATH`                |                  | `s3a://raw`         | Root path for raw CSVs      |
+| `CLEAN_BASE_PATH`              |                  | `s3a://clean/olist` | Root path for bronze/silver |
+| `MART_BASE_PATH`               |                  | `s3a://mart/olist`  | Root path for gold marts    |
+| `SPARK_SQL_SHUFFLE_PARTITIONS` |                  | `8`                 | Spark shuffle partitions    |

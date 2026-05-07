@@ -1,70 +1,77 @@
-import argparse
+"""
+etl_orders.py — Data-quality gate for the orders table.
 
-from core.spark_session import get_spark
+Reads from Bronze, validates primary key uniqueness and required fields,
+writes clean rows to Silver staging and invalid rows to a quarantine table.
+This job must run after bronze_ingest_olist and before silver_build_model.
+
+Silver outputs:
+  silver/stg_orders            — valid, deduplicated orders
+  silver/stg_orders_quarantine — rows that failed validation
+"""
+
+from core.config import load_storage_config
 from core.logger import logger
+from core.spark_session import get_spark
+from core.io import write_parquet
+
+from pyspark.sql import functions as F
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="ETL job for orders dataset.")
-    parser.add_argument(
-        "--input-path",
-        default="s3a://raw/olist_orders_dataset.csv",
-        help="Input CSV path (local/S3A)."
-    )
-    parser.add_argument(
-        "--output-path",
-        default="s3a://clean/orders",
-        help="Output Parquet path (local/S3A)."
-    )
-    parser.add_argument(
-        "--write-mode",
-        default="overwrite",
-        choices=["overwrite", "append", "ignore", "error", "errorifexists"],
-        help="Spark write mode for output dataset."
-    )
-    return parser.parse_args()
+REQUIRED_COLUMNS = [
+    "order_id",
+    "customer_id",
+    "order_status",
+    "order_purchase_timestamp",
+]
 
 
-def run(input_path: str, output_path: str, write_mode: str):
+def run():
     spark = get_spark("etl_orders")
+    storage = load_storage_config()
 
-    logger.info("Loading raw orders from %s", input_path)
-
-    df = spark.read.csv(
-        input_path,
-        header=True,
-        inferSchema=True
-    )
-
-    required_columns = [
-        "order_id",
-        "customer_id",
-        "order_status",
-        "order_purchase_timestamp"
-    ]
-
-    missing_columns = [
-        col for col in required_columns if col not in df.columns]
-    if missing_columns:
-        raise ValueError(f"Missing required columns: {missing_columns}")
-
-    df_clean = df.dropna(subset=required_columns).cache()
-
+    logger.info("Reading bronze orders")
+    df = spark.read.parquet(storage.bronze_path("orders"))
     raw_count = df.count()
-    clean_count = df_clean.count()
-    dropped_count = raw_count - clean_count
-    logger.info("raw count = %s", raw_count)
-    logger.info("clean count = %s", clean_count)
-    logger.info("dropped rows = %s", dropped_count)
+    logger.info("Bronze orders: %d rows", raw_count)
 
-    logger.info("Writing cleaned orders to %s with mode=%s",
-                output_path, write_mode)
-    df_clean.write.mode(write_mode).parquet(output_path)
-    df_clean.unpersist()
+    # ── 1. Check required columns exist ──────────────────────────────────
+    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Bronze orders table is missing required columns: {missing}")
 
-    logger.info("ETL for orders completed successfully.")
+    # ── 2. Tag rows that fail validation ─────────────────────────────────
+    null_filter = F.lit(False)
+    for col in REQUIRED_COLUMNS:
+        null_filter = null_filter | F.col(col).isNull()
+
+    # Duplicate order_ids (keep first occurrence, flag the rest)
+    window = (
+        __import__("pyspark.sql.window", fromlist=["Window"])
+        .Window.partitionBy("order_id")
+        .orderBy("order_purchase_timestamp")
+    )
+    df_ranked = df.withColumn("_row_num", F.row_number().over(window))
+
+    invalid = df_ranked.filter(null_filter | (
+        F.col("_row_num") > 1)).drop("_row_num")
+    valid = df_ranked.filter(~null_filter & (
+        F.col("_row_num") == 1)).drop("_row_num")
+
+    valid_count = valid.count()
+    invalid_count = invalid.count()
+    logger.info("Valid rows: %d | Quarantined: %d", valid_count, invalid_count)
+
+    if invalid_count > 0:
+        logger.warning("%d rows sent to quarantine", invalid_count)
+
+    # ── 3. Write ──────────────────────────────────────────────────────────
+    write_parquet(valid,   storage.silver_path("stg_orders"))
+    write_parquet(invalid, storage.silver_path("stg_orders_quarantine"))
+
+    logger.info("etl_orders completed.")
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    run(args.input_path, args.output_path, args.write_mode)
+    run()

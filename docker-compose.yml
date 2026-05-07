@@ -5,49 +5,40 @@ services:
   minio:
     image: minio/minio
     container_name: minio
-
     volumes:
       - ./minio_data:/data
-
-    # Expose MinIO API and Web Console ports
     ports:
       - "9000:9000" # S3 API endpoint
       - "9001:9001" # MinIO Web UI
-
     environment:
-      # Root credentials for local development only (NOT production-safe)
       MINIO_ROOT_USER: admin
       MINIO_ROOT_PASSWORD: password123
-
-    # Start MinIO server with web console enabled
     command: server /data --console-address ":9001"
 
   # =========================
-  # Apache Spark Cluster (Standalone Master)
+  # Apache Spark (Standalone Master)
   # =========================
   spark:
-    image: apache/spark:3.5.3
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: spark
-
     working_dir: /opt/spark/work-dir
 
+    # Inject S3 / Kaggle credentials from the local .env file so
+    # spark-submit jobs pick them up without any manual export.
+    env_file: .env
+
     volumes:
-      # Mount application code into container
       - .:/opt/spark/work-dir
-      # Persist Ivy dependency cache to avoid re-downloading packages
       - ./ivy:/home/spark/.ivy2
 
     environment:
       - PYTHONPATH=$PYTHONPATH:/opt/spark/work-dir
 
-    # Start Spark Master node
-    # (In a full cluster setup, workers would connect to this master)
     command: >
       /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
 
     ports:
-      # Spark Web UI (job monitoring)
       - "8080:8080"
-
-      # Spark master communication port (cluster coordination)
       - "7077:7077"
