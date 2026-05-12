@@ -5,11 +5,11 @@ Reads from silver layer once, builds a shared enriched DataFrame,
 then derives all four gold marts from it to avoid redundant I/O and joins.
 
 Writes to:
-  gold/mart_order_analytics     — wide table for BI / ad-hoc exploration
-  gold/mart_daily_sales         — day-level GMV and KPIs
-  gold/mart_state_performance   — state-level GMV and KPIs
-  gold/mart_category_performance— category-level GMV and KPIs
-  gold/mart_order_status_daily  — daily KPIs broken out by order status
+  gold/mart_order_analytics      — wide table for BI / ad-hoc exploration
+  gold/mart_daily_sales          — day-level GMV and KPIs
+  gold/mart_state_performance    — state-level GMV and KPIs
+  gold/mart_category_performance — category-level GMV and KPIs
+  gold/mart_order_status_daily   — daily KPIs broken out by order status
 """
 
 from pyspark.sql import functions as F
@@ -25,12 +25,12 @@ def run():
     storage = load_storage_config()
 
     # ── Read silver once ──────────────────────────────────────────────────
-    fct = spark.read.parquet(storage.silver_path("fct_order_items"))
+    fct   = spark.read.parquet(storage.silver_path("fct_order_items"))
     dim_c = spark.read.parquet(storage.silver_path("dim_customers"))
     dim_p = spark.read.parquet(storage.silver_path("dim_products"))
     dim_s = spark.read.parquet(storage.silver_path("dim_sellers"))
 
-    # ── One shared enriched table – cache it so all marts read from memory
+    # ── One shared enriched table — cache so all marts read from memory ──
     fct_enriched = (
         fct
         .join(dim_c.select("customer_id", "customer_state", "customer_city"),
@@ -67,14 +67,17 @@ def run():
     )
 
     # ── mart_daily_sales ──────────────────────────────────────────────────
+    # delay_rate: F.avg ignores null rows (undelivered orders), so the rate
+    # is computed only over orders with a known delivery outcome. This is
+    # intentional — undelivered orders should not be treated as on-time.
     mart_daily_sales = (
         fct_enriched.groupBy("order_date")
         .agg(
             F.countDistinct("order_id").alias("orders"),
-            F.round(F.sum("price"),            2).alias("gmv"),
-            F.round(F.sum("freight_value"),    2).alias("freight_total"),
-            F.round(F.avg("review_score"),     2).alias("avg_review_score"),
-            F.round(F.avg("is_delayed"),       4).alias("delay_rate"),
+            F.round(F.sum("price"),         2).alias("gmv"),
+            F.round(F.sum("freight_value"), 2).alias("freight_total"),
+            F.round(F.avg("review_score"),  2).alias("avg_review_score"),
+            F.round(F.avg("is_delayed"),    4).alias("delay_rate"),
         )
         .orderBy("order_date")
     )
@@ -106,23 +109,18 @@ def run():
         fct_enriched.groupBy("order_date", "order_status")
         .agg(
             F.countDistinct("order_id").alias("order_cnt"),
-            F.round(F.sum("price"),        2).alias("gmv"),
-            F.round(F.avg("is_delayed"),   4).alias("delay_rate"),
+            F.round(F.sum("price"),      2).alias("gmv"),
+            F.round(F.avg("is_delayed"), 4).alias("delay_rate"),
         )
         .orderBy("order_date", "order_status")
     )
 
     # ── Write ─────────────────────────────────────────────────────────────
-    write_parquet(mart_order_analytics,
-                  storage.gold_path("mart_order_analytics"))
-    write_parquet(mart_daily_sales,
-                  storage.gold_path("mart_daily_sales"))
-    write_parquet(mart_state_performance,
-                  storage.gold_path("mart_state_performance"))
-    write_parquet(mart_category_performance,
-                  storage.gold_path("mart_category_performance"))
-    write_parquet(mart_order_status_daily,
-                  storage.gold_path("mart_order_status_daily"))
+    write_parquet(mart_order_analytics,     storage.gold_path("mart_order_analytics"))
+    write_parquet(mart_daily_sales,         storage.gold_path("mart_daily_sales"))
+    write_parquet(mart_state_performance,   storage.gold_path("mart_state_performance"))
+    write_parquet(mart_category_performance,storage.gold_path("mart_category_performance"))
+    write_parquet(mart_order_status_daily,  storage.gold_path("mart_order_status_daily"))
 
     fct_enriched.unpersist()
     logger.info("Gold marts build complete.")

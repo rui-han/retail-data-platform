@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ── Load .env if present ──────────────────────────────────────────────────────
+if [[ -f .env ]]; then
+  # Export only non-comment, non-empty KEY=VALUE lines.
+  set -a
+  # shellcheck disable=SC1091
+  source <(grep -E '^\s*[^#][^=]*=.*' .env)
+  set +a
+else
+  echo "ERROR: .env file not found. Copy .env.example to .env and fill in your credentials." >&2
+  exit 1
+fi
+
+# ── Validate required env vars ────────────────────────────────────────────────
 DATASET="${DATASET:-olistbr/brazilian-ecommerce}"
 BUCKET="${BUCKET:-raw}"
 PREFIX="${PREFIX:-olist}"

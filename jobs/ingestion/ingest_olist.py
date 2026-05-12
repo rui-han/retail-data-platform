@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import tempfile
 import zipfile
 from datetime import datetime, timezone
@@ -49,7 +48,7 @@ def ensure_bucket(s3_client, bucket: str):
 
 def download_kaggle_dataset_zip(dataset: str, timeout_sec: int, dest_dir: Path) -> Path:
     kaggle_username = _require_env("KAGGLE_USERNAME")
-    kaggle_key = _require_env("KAGGLE_KEY")
+    kaggle_key      = _require_env("KAGGLE_KEY")
     url = f"https://www.kaggle.com/api/v1/datasets/download/{quote(dataset, safe='/')}"
 
     logger.info("Downloading Kaggle dataset from %s", url)
@@ -92,13 +91,12 @@ def upload_files(s3_client, csv_files: list[Path], bucket: str, prefix: str, dat
     uploaded_objects = []
 
     for file_path in csv_files:
-        # Archive copy — one immutable snapshot per run, never overwritten
+        # Archive copy — one immutable snapshot per run, never overwritten.
         archive_key = f"{prefix}/archive/{run_ts}/{file_path.name}"
-        logger.info("Uploading %s → s3://%s/%s",
-                    file_path.name, bucket, archive_key)
+        logger.info("Uploading %s → s3://%s/%s", file_path.name, bucket, archive_key)
         s3_client.upload_file(str(file_path), bucket, archive_key)
 
-        # Latest copy — always points to the most recent ingest run
+        # Latest copy — always points to the most recent ingest run.
         latest_key = f"{prefix}/latest/{file_path.name}"
         s3_client.copy_object(
             Bucket=bucket,
@@ -114,21 +112,24 @@ def upload_files(s3_client, csv_files: list[Path], bucket: str, prefix: str, dat
         })
 
     manifest = {
-        "source":      f"kaggle:{dataset}",
-        "run_ts_utc":  run_ts,
-        "file_count":  len(uploaded_objects),
-        "files":       uploaded_objects,
+        "source":     f"kaggle:{dataset}",
+        "run_ts_utc": run_ts,
+        "file_count": len(uploaded_objects),
+        "files":      uploaded_objects,
     }
 
-    # Write manifest to both archive and latest for traceability
-    manifest_body = json.dumps(
-        manifest, ensure_ascii=False, indent=2).encode("utf-8")
-    for key in (f"{prefix}/archive/{run_ts}/_manifest.json", f"{prefix}/latest/_manifest.json"):
-        s3_client.put_object(Bucket=bucket, Key=key,
-                             Body=manifest_body, ContentType="application/json")
+    # Write manifest to both archive and latest for traceability.
+    manifest_body = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+    for key in (
+        f"{prefix}/archive/{run_ts}/_manifest.json",
+        f"{prefix}/latest/_manifest.json",
+    ):
+        s3_client.put_object(
+            Bucket=bucket, Key=key,
+            Body=manifest_body, ContentType="application/json",
+        )
 
-    logger.info("Manifest written for run %s (%d files)",
-                run_ts, len(uploaded_objects))
+    logger.info("Manifest written for run %s (%d files)", run_ts, len(uploaded_objects))
 
 
 def run():
@@ -136,11 +137,10 @@ def run():
     s3_client = build_s3_client()
     ensure_bucket(s3_client, args.bucket)
 
-    # Use a TemporaryDirectory so cleanup always happens, even on error.
+    # TemporaryDirectory ensures cleanup even on error.
     with tempfile.TemporaryDirectory(prefix="olist_ingest_") as tmp:
-        tmp_path = Path(tmp)
-        zip_path = download_kaggle_dataset_zip(
-            args.dataset, args.timeout_sec, tmp_path)
+        tmp_path  = Path(tmp)
+        zip_path  = download_kaggle_dataset_zip(args.dataset, args.timeout_sec, tmp_path)
         csv_files = extract_csv_files(zip_path)
         upload_files(
             s3_client=s3_client,

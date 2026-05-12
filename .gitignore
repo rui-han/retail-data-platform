@@ -5,3 +5,5 @@ minio_data/
 ivy/
 
 .env
+
+.idea/

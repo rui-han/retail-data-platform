@@ -50,11 +50,10 @@ def read_raw_csv(spark: SparkSession, filename: str, table: str = "") -> DataFra
             "No explicit schema for '%s', falling back to inferSchema", filename)
         df = spark.read.csv(path, header=True, inferSchema=True)
 
-    logger.info("Loaded %s → %d rows", path, df.count())
     return df
 
 
 def write_parquet(df: DataFrame, path: str, mode: str = "overwrite") -> None:
-    count = df.count()
-    logger.info("Writing %d rows → %s (mode=%s)", count, path, mode)
+    """Write *df* to *path* as Parquet. Logs after the write completes."""
     df.write.mode(mode).parquet(path)
+    logger.info("Written → %s (mode=%s)", path, mode)

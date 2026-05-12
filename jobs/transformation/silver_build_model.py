@@ -26,17 +26,16 @@ def run():
     storage = load_storage_config()
 
     # ── Sources ───────────────────────────────────────────────────────────
-    customers = spark.read.parquet(storage.bronze_path("customers"))
-    sellers = spark.read.parquet(storage.bronze_path("sellers"))
-    products = spark.read.parquet(storage.bronze_path("products"))
-    category_translation = spark.read.parquet(
-        storage.bronze_path("category_translation"))
-    geolocation = spark.read.parquet(storage.bronze_path("geolocation"))
-    order_items = spark.read.parquet(storage.bronze_path("order_items"))
-    order_payments = spark.read.parquet(storage.bronze_path("order_payments"))
-    order_reviews = spark.read.parquet(storage.bronze_path("order_reviews"))
+    customers            = spark.read.parquet(storage.bronze_path("customers"))
+    sellers              = spark.read.parquet(storage.bronze_path("sellers"))
+    products             = spark.read.parquet(storage.bronze_path("products"))
+    category_translation = spark.read.parquet(storage.bronze_path("category_translation"))
+    geolocation          = spark.read.parquet(storage.bronze_path("geolocation"))
+    order_items          = spark.read.parquet(storage.bronze_path("order_items"))
+    order_payments       = spark.read.parquet(storage.bronze_path("order_payments"))
+    order_reviews        = spark.read.parquet(storage.bronze_path("order_reviews"))
 
-    # Read validated orders from silver staging (output of etl_orders).
+    # Validated orders from silver staging (output of etl_orders).
     orders_clean = spark.read.parquet(storage.silver_path("stg_orders"))
     logger.info("stg_orders: %d rows", orders_clean.count())
 
@@ -79,8 +78,7 @@ def run():
         .join(category_translation, on="product_category_name", how="left")
         .withColumn(
             "product_category_name_en",
-            F.coalesce(F.col("product_category_name_english"),
-                       F.lit("unknown")),
+            F.coalesce(F.col("product_category_name_english"), F.lit("unknown")),
         )
         .drop("product_category_name_english")
     )
@@ -88,27 +86,26 @@ def run():
     # ── Parse timestamps on validated orders ─────────────────────────────
     orders_ts = (
         orders_clean
-        .withColumn("order_purchase_ts",         F.to_timestamp("order_purchase_timestamp"))
-        .withColumn("order_approved_ts",          F.to_timestamp("order_approved_at"))
-        .withColumn("order_delivered_carrier_ts", F.to_timestamp("order_delivered_carrier_date"))
+        .withColumn("order_purchase_ts",          F.to_timestamp("order_purchase_timestamp"))
+        .withColumn("order_approved_ts",           F.to_timestamp("order_approved_at"))
+        .withColumn("order_delivered_carrier_ts",  F.to_timestamp("order_delivered_carrier_date"))
         .withColumn("order_delivered_customer_ts", F.to_timestamp("order_delivered_customer_date"))
         .withColumn("order_estimated_delivery_ts", F.to_timestamp("order_estimated_delivery_date"))
     )
 
-    # ── Aggregate payments and reviews ───────────────────────────────────
+    # ── Aggregate payments ────────────────────────────────────────────────
+    # Schemas already enforced in bronze (payment_value: double,
+    # payment_installments: integer), so no extra casts needed here.
     payments_agg = order_payments.groupBy("order_id").agg(
-        F.sum(F.col("payment_value").cast("double")).alias(
-            "payment_value_total"),
-        F.first("payment_type", ignorenulls=True).alias(
-            "payment_type_primary"),
-        F.sum(F.col("payment_installments").cast("int")).alias(
-            "payment_installments_total"),
+        F.sum("payment_value").alias("payment_value_total"),
+        F.first("payment_type", ignorenulls=True).alias("payment_type_primary"),
+        F.sum("payment_installments").alias("payment_installments_total"),
     )
 
+    # ── Aggregate reviews ─────────────────────────────────────────────────
     reviews_agg = order_reviews.groupBy("order_id").agg(
-        F.max(F.col("review_score").cast("int")).alias("review_score"),
-        F.max(F.to_timestamp("review_creation_date")).alias(
-            "review_creation_ts"),
+        F.max("review_score").alias("review_score"),
+        F.max(F.to_timestamp("review_creation_date")).alias("review_creation_ts"),
     )
 
     # ── Fact table ────────────────────────────────────────────────────────
@@ -125,13 +122,18 @@ def run():
         .join(payments_agg, on="order_id", how="left")
         .join(reviews_agg,  on="order_id", how="left")
         .withColumn("order_date", F.to_date("order_purchase_ts"))
+        # is_delayed semantics:
+        #   null  → order not yet delivered (unknown)
+        #   1     → delivered after estimated date
+        #   0     → delivered on time or early
         .withColumn(
             "is_delayed",
-            F.when(
-                F.col("order_delivered_customer_ts") > F.col(
-                    "order_estimated_delivery_ts"),
-                F.lit(1),
-            ).otherwise(F.lit(0)),
+            F.when(F.col("order_delivered_customer_ts").isNull(), F.lit(None))
+             .when(
+                 F.col("order_delivered_customer_ts") > F.col("order_estimated_delivery_ts"),
+                 F.lit(1),
+             )
+             .otherwise(F.lit(0)),
         )
         .dropDuplicates(["order_id", "order_item_id"])
     )

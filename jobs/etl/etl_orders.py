@@ -10,12 +10,13 @@ Silver outputs:
   silver/stg_orders_quarantine — rows that failed validation
 """
 
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
 from core.config import load_storage_config
+from core.io import write_parquet
 from core.logger import logger
 from core.spark_session import get_spark
-from core.io import write_parquet
-
-from pyspark.sql import functions as F
 
 
 REQUIRED_COLUMNS = [
@@ -32,8 +33,7 @@ def run():
 
     logger.info("Reading bronze orders")
     df = spark.read.parquet(storage.bronze_path("orders"))
-    raw_count = df.count()
-    logger.info("Bronze orders: %d rows", raw_count)
+    logger.info("Bronze orders: %d rows", df.count())
 
     # ── 1. Check required columns exist ──────────────────────────────────
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
@@ -46,20 +46,18 @@ def run():
     for col in REQUIRED_COLUMNS:
         null_filter = null_filter | F.col(col).isNull()
 
-    # Duplicate order_ids (keep first occurrence, flag the rest)
+    # Duplicate order_ids: keep first occurrence, flag the rest.
     window = (
-        __import__("pyspark.sql.window", fromlist=["Window"])
-        .Window.partitionBy("order_id")
+        Window
+        .partitionBy("order_id")
         .orderBy("order_purchase_timestamp")
     )
     df_ranked = df.withColumn("_row_num", F.row_number().over(window))
 
-    invalid = df_ranked.filter(null_filter | (
-        F.col("_row_num") > 1)).drop("_row_num")
-    valid = df_ranked.filter(~null_filter & (
-        F.col("_row_num") == 1)).drop("_row_num")
+    invalid = df_ranked.filter(null_filter | (F.col("_row_num") > 1)).drop("_row_num")
+    valid   = df_ranked.filter(~null_filter & (F.col("_row_num") == 1)).drop("_row_num")
 
-    valid_count = valid.count()
+    valid_count   = valid.count()
     invalid_count = invalid.count()
     logger.info("Valid rows: %d | Quarantined: %d", valid_count, invalid_count)
 

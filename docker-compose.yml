@@ -10,9 +10,10 @@ services:
     ports:
       - "9000:9000" # S3 API endpoint
       - "9001:9001" # MinIO Web UI
+    env_file: .env
     environment:
-      MINIO_ROOT_USER: admin
-      MINIO_ROOT_PASSWORD: password123
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     command: server /data --console-address ":9001"
 
   # =========================
