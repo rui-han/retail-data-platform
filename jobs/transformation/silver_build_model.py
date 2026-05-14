@@ -73,8 +73,12 @@ def run():
         )
     )
 
+    # FIX: dropDuplicates on product_id BEFORE the join.
+    # Without this, duplicate product_ids in the source would fan-out rows
+    # when joined to fct_order_items, silently inflating item counts and GMV.
     dim_products = (
         products
+        .dropDuplicates(["product_id"])
         .join(category_translation, on="product_category_name", how="left")
         .withColumn(
             "product_category_name_en",
@@ -96,6 +100,11 @@ def run():
     # ── Aggregate payments ────────────────────────────────────────────────
     # Schemas already enforced in bronze (payment_value: double,
     # payment_installments: integer), so no extra casts needed here.
+    #
+    # payment_type_primary: an order may use multiple payment methods (e.g.
+    # credit card + voucher). We take the first non-null type observed in the
+    # source data as the "primary" method. This is intentionally non-deterministic
+    # across runs if the source ordering changes — acceptable for a BI summary field.
     payments_agg = order_payments.groupBy("order_id").agg(
         F.sum("payment_value").alias("payment_value_total"),
         F.first("payment_type", ignorenulls=True).alias("payment_type_primary"),
@@ -103,6 +112,10 @@ def run():
     )
 
     # ── Aggregate reviews ─────────────────────────────────────────────────
+    # An order can receive multiple reviews over time. We take the highest
+    # score as the representative rating — reflects best customer sentiment
+    # after any follow-up resolution. Change to F.min or F.avg if a different
+    # business definition is required.
     reviews_agg = order_reviews.groupBy("order_id").agg(
         F.max("review_score").alias("review_score"),
         F.max(F.to_timestamp("review_creation_date")).alias("review_creation_ts"),
@@ -123,17 +136,25 @@ def run():
         .join(reviews_agg,  on="order_id", how="left")
         .withColumn("order_date", F.to_date("order_purchase_ts"))
         # is_delayed semantics:
-        #   null  → order not yet delivered (unknown)
+        #   null  → order not yet delivered (unknown outcome, excluded from rate calc)
         #   1     → delivered after estimated date
         #   0     → delivered on time or early
+        #
+        # FIX: cast the null branch to IntegerType explicitly. F.lit(None) resolves
+        # to NullType, which Spark must coerce when merging branches — the implicit
+        # coercion is version-dependent and can produce schema warnings or subtle
+        # type mismatches downstream.
         .withColumn(
             "is_delayed",
-            F.when(F.col("order_delivered_customer_ts").isNull(), F.lit(None))
-             .when(
-                 F.col("order_delivered_customer_ts") > F.col("order_estimated_delivery_ts"),
-                 F.lit(1),
-             )
-             .otherwise(F.lit(0)),
+            F.when(
+                F.col("order_delivered_customer_ts").isNull(),
+                F.lit(None).cast("integer"),
+            )
+            .when(
+                F.col("order_delivered_customer_ts") > F.col("order_estimated_delivery_ts"),
+                F.lit(1),
+            )
+            .otherwise(F.lit(0)),
         )
         .dropDuplicates(["order_id", "order_item_id"])
     )

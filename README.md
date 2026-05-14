@@ -40,7 +40,7 @@ Raw-to-Parquet ingestion with explicit schemas, one table per dataset:
 
 | Job                   | Path                   | Reads from                      | Writes to                                           |
 | --------------------- | ---------------------- | ------------------------------- | --------------------------------------------------- |
-| `bronze_ingest_olist` | `jobs/ingestion/`      | `raw/*` CSVs                    | `silver/bronze/*`                                   |
+| `bronze_ingest_olist` | `jobs/ingestion/`      | `raw/*` CSVs                    | `bronze/*`                                          |
 | `etl_orders`          | `jobs/etl/`            | `bronze/orders`                 | `silver/stg_orders`, `silver/stg_orders_quarantine` |
 | `silver_build_model`  | `jobs/transformation/` | `bronze/*`, `silver/stg_orders` | `silver/dim_*`, `silver/fct_order_items`            |
 | `gold_build_marts`    | `jobs/transformation/` | `silver/*`                      | `gold/mart_*`                                       |
@@ -72,10 +72,10 @@ The Spark container automatically loads `.env` via `env_file` in `docker-compose
 
 ```bash
 # Linux / macOS
-./scripts/run_ingest_olist.sh
+./scripts/run_kaggle_upload.sh
 
 # Windows PowerShell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_ingest_olist.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\run_kaggle_upload.ps1
 ```
 
 ### 3.4 Run full pipeline
@@ -116,8 +116,8 @@ docker exec spark /opt/spark/bin/spark-submit \
 │   └── spark_session.py   # SparkSession factory
 ├── jobs/
 │   ├── ingestion/
-│   │   ├── ingest_olist.py          # Kaggle → MinIO raw upload
-│   │   └── bronze_ingest_olist.py   # raw CSV → bronze Parquet
+│   │   ├── kaggle_upload.py         # Kaggle → MinIO raw upload (boto3, no Spark)
+│   │   └── bronze_ingest_olist.py   # raw CSV → bronze Parquet (PySpark)
 │   ├── etl/
 │   │   └── etl_orders.py            # DQ gate: valid → stg_orders, invalid → quarantine
 │   └── transformation/
@@ -125,7 +125,7 @@ docker exec spark /opt/spark/bin/spark-submit \
 │       └── gold_build_marts.py      # all five gold marts (shared enriched cache)
 ├── scripts/
 │   ├── run_olist_pipeline.ps1 / .sh
-│   └── run_ingest_olist.ps1 / .sh
+│   └── run_kaggle_upload.ps1 / .sh
 ├── .env.example
 ├── .gitignore
 └── docker-compose.yml

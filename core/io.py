@@ -5,7 +5,7 @@ from pyspark.sql.types import (
     DoubleType, IntegerType, StringType, StructField, StructType
 )
 
-from core.config import OLIST_SCHEMAS, load_storage_config
+from core.config import OLIST_SCHEMAS
 from core.logger import logger
 
 
@@ -29,25 +29,26 @@ def _build_schema(table: str) -> StructType | None:
     ])
 
 
-def read_raw_csv(spark: SparkSession, filename: str, table: str = "") -> DataFrame:
+# FIX: path is now a caller-supplied parameter instead of being resolved
+# internally via load_storage_config(). This removes the hidden per-call
+# overhead of reading environment variables on every table in the bronze loop,
+# and makes the function straightforward to unit-test without env var mocking.
+def read_raw_csv(spark: SparkSession, path: str, table: str = "") -> DataFrame:
     """
-    Read a raw CSV from the configured raw bucket.
+    Read a raw CSV from *path*.
 
     If *table* matches a key in OLIST_SCHEMAS the schema is applied
     explicitly, avoiding a full-file scan and type-inference surprises.
     When no schema is found, inferSchema falls back gracefully.
     """
-    storage = load_storage_config()
-    path = storage.raw_path(filename)
-
-    schema = _build_schema(table or filename.replace(".csv", ""))
+    schema = _build_schema(table)
     if schema:
         logger.info("Reading %s with explicit schema (%d fields)",
                     path, len(schema))
         df = spark.read.csv(path, header=True, schema=schema)
     else:
         logger.warning(
-            "No explicit schema for '%s', falling back to inferSchema", filename)
+            "No explicit schema for table '%s', falling back to inferSchema", table)
         df = spark.read.csv(path, header=True, inferSchema=True)
 
     return df

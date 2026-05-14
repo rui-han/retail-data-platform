@@ -14,10 +14,10 @@ if (Test-Path .env) {
   exit 1
 }
 
-$dataset   = if ($env:DATASET)     { $env:DATASET }     else { "olistbr/brazilian-ecommerce" }
-$bucket    = if ($env:BUCKET)      { $env:BUCKET }      else { "raw" }
-$prefix    = if ($env:PREFIX)      { $env:PREFIX }      else { "olist" }
-$timeoutSec = if ($env:TIMEOUT_SEC) { $env:TIMEOUT_SEC } else { "300" }
+$dataset   = if ($env:DATASET)      { $env:DATASET }      else { "olistbr/brazilian-ecommerce" }
+$bucket    = if ($env:BUCKET)       { $env:BUCKET }       else { "raw" }
+$prefix    = if ($env:PREFIX)       { $env:PREFIX }       else { "olist" }
+$timeoutSec = if ($env:TIMEOUT_SEC) { $env:TIMEOUT_SEC }  else { "300" }
 
 $requiredEnvVars = @("KAGGLE_USERNAME", "KAGGLE_KEY", "S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY")
 foreach ($envName in $requiredEnvVars) {
@@ -27,10 +27,10 @@ foreach ($envName in $requiredEnvVars) {
   }
 }
 
-Write-Host "Running Olist ingest:"
+Write-Host "Running Kaggle upload:"
 Write-Host "  DATASET=$dataset  BUCKET=$bucket  PREFIX=$prefix  TIMEOUT_SEC=$timeoutSec"
 
-python jobs/ingestion/ingest_olist.py `
+python jobs/ingestion/kaggle_upload.py `
   --dataset "$dataset" `
   --bucket  "$bucket" `
   --prefix  "$prefix" `

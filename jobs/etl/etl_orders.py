@@ -46,11 +46,13 @@ def run():
     for col in REQUIRED_COLUMNS:
         null_filter = null_filter | F.col(col).isNull()
 
-    # Duplicate order_ids: keep first occurrence, flag the rest.
+    # Duplicate order_ids: keep first occurrence by purchase time, flag the rest.
+    # FIX: order by parsed timestamp, not the raw string, to guarantee correct
+    # chronological ordering regardless of source formatting variations.
     window = (
         Window
         .partitionBy("order_id")
-        .orderBy("order_purchase_timestamp")
+        .orderBy(F.to_timestamp("order_purchase_timestamp"))
     )
     df_ranked = df.withColumn("_row_num", F.row_number().over(window))
 

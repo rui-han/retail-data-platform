@@ -2,7 +2,7 @@
 gold_build_marts.py — Aggregated business marts + wide analytics table.
 
 Reads from silver layer once, builds a shared enriched DataFrame,
-then derives all four gold marts from it to avoid redundant I/O and joins.
+then derives all five gold marts from it to avoid redundant I/O and joins.
 
 Writes to:
   gold/mart_order_analytics      — wide table for BI / ad-hoc exploration
@@ -31,6 +31,11 @@ def run():
     dim_s = spark.read.parquet(storage.silver_path("dim_sellers"))
 
     # ── One shared enriched table — cache so all marts read from memory ──
+    # FIX: removed the redundant fct_enriched.count() call that was here only
+    # to log a row count. count() triggers a full materialisation of the three-way
+    # join before any mart has run — identical work to what the first mart would
+    # do anyway. The cache materialises on first use (mart_order_analytics below),
+    # so subsequent marts read from memory without any extra scans.
     fct_enriched = (
         fct
         .join(dim_c.select("customer_id", "customer_state", "customer_city"),
@@ -42,8 +47,7 @@ def run():
         .cache()
     )
 
-    enriched_count = fct_enriched.count()   # triggers the cache
-    logger.info("Enriched fact rows cached: %d", enriched_count)
+    logger.info("Enriched fact DataFrame cached (materialises on first mart action).")
 
     # ── mart_order_analytics (wide, row-level) ───────────────────────────
     mart_order_analytics = fct_enriched.select(
@@ -116,11 +120,11 @@ def run():
     )
 
     # ── Write ─────────────────────────────────────────────────────────────
-    write_parquet(mart_order_analytics,     storage.gold_path("mart_order_analytics"))
-    write_parquet(mart_daily_sales,         storage.gold_path("mart_daily_sales"))
-    write_parquet(mart_state_performance,   storage.gold_path("mart_state_performance"))
-    write_parquet(mart_category_performance,storage.gold_path("mart_category_performance"))
-    write_parquet(mart_order_status_daily,  storage.gold_path("mart_order_status_daily"))
+    write_parquet(mart_order_analytics,      storage.gold_path("mart_order_analytics"))
+    write_parquet(mart_daily_sales,          storage.gold_path("mart_daily_sales"))
+    write_parquet(mart_state_performance,    storage.gold_path("mart_state_performance"))
+    write_parquet(mart_category_performance, storage.gold_path("mart_category_performance"))
+    write_parquet(mart_order_status_daily,   storage.gold_path("mart_order_status_daily"))
 
     fct_enriched.unpersist()
     logger.info("Gold marts build complete.")

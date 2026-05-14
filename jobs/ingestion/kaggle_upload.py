@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import tempfile
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,10 @@ from botocore.exceptions import ClientError
 
 from core.config import _require_env
 from core.logger import logger
+
+
+_DOWNLOAD_MAX_RETRIES = 3
+_DOWNLOAD_RETRY_DELAY = 5   # seconds between attempts
 
 
 def parse_args():
@@ -47,28 +52,59 @@ def ensure_bucket(s3_client, bucket: str):
 
 
 def download_kaggle_dataset_zip(dataset: str, timeout_sec: int, dest_dir: Path) -> Path:
+    """Download the Kaggle dataset zip, retrying on transient network errors.
+
+    Retries up to _DOWNLOAD_MAX_RETRIES times with a fixed delay between
+    attempts. HTTP 4xx errors (bad credentials, dataset not found) are not
+    retried — they indicate a configuration problem that a retry won't fix.
+    """
     kaggle_username = _require_env("KAGGLE_USERNAME")
     kaggle_key      = _require_env("KAGGLE_KEY")
     url = f"https://www.kaggle.com/api/v1/datasets/download/{quote(dataset, safe='/')}"
-
-    logger.info("Downloading Kaggle dataset from %s", url)
-    response = requests.get(
-        url,
-        auth=(kaggle_username, kaggle_key),
-        stream=True,
-        timeout=timeout_sec,
-    )
-    response.raise_for_status()
-
     zip_path = dest_dir / "dataset.zip"
-    with zip_path.open("wb") as f:
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
-            if chunk:
-                f.write(chunk)
 
-    logger.info("Downloaded zip → %s (%.1f MB)",
-                zip_path, zip_path.stat().st_size / 1e6)
-    return zip_path
+    for attempt in range(1, _DOWNLOAD_MAX_RETRIES + 1):
+        logger.info("Downloading Kaggle dataset from %s (attempt %d/%d)",
+                    url, attempt, _DOWNLOAD_MAX_RETRIES)
+        try:
+            response = requests.get(
+                url,
+                auth=(kaggle_username, kaggle_key),
+                stream=True,
+                timeout=timeout_sec,
+            )
+            if 400 <= response.status_code < 500:
+                response.raise_for_status()
+
+            response.raise_for_status()
+
+            with zip_path.open("wb") as f:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+            logger.info("Downloaded zip → %s (%.1f MB)",
+                        zip_path, zip_path.stat().st_size / 1e6)
+            return zip_path
+
+        except requests.exceptions.HTTPError:
+            raise
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                requests.exceptions.ChunkedEncodingError) as exc:
+            if attempt == _DOWNLOAD_MAX_RETRIES:
+                raise RuntimeError(
+                    f"Kaggle download failed after {_DOWNLOAD_MAX_RETRIES} attempts: {exc}"
+                ) from exc
+            logger.warning(
+                "Download attempt %d failed (%s). Retrying in %ds…",
+                attempt, exc, _DOWNLOAD_RETRY_DELAY,
+            )
+            if zip_path.exists():
+                zip_path.unlink()
+            time.sleep(_DOWNLOAD_RETRY_DELAY)
+
+    raise RuntimeError("Unexpected exit from download retry loop.")
 
 
 def extract_csv_files(zip_path: Path) -> list[Path]:
@@ -91,12 +127,10 @@ def upload_files(s3_client, csv_files: list[Path], bucket: str, prefix: str, dat
     uploaded_objects = []
 
     for file_path in csv_files:
-        # Archive copy — one immutable snapshot per run, never overwritten.
         archive_key = f"{prefix}/archive/{run_ts}/{file_path.name}"
         logger.info("Uploading %s → s3://%s/%s", file_path.name, bucket, archive_key)
         s3_client.upload_file(str(file_path), bucket, archive_key)
 
-        # Latest copy — always points to the most recent ingest run.
         latest_key = f"{prefix}/latest/{file_path.name}"
         s3_client.copy_object(
             Bucket=bucket,
@@ -118,7 +152,6 @@ def upload_files(s3_client, csv_files: list[Path], bucket: str, prefix: str, dat
         "files":      uploaded_objects,
     }
 
-    # Write manifest to both archive and latest for traceability.
     manifest_body = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
     for key in (
         f"{prefix}/archive/{run_ts}/_manifest.json",
@@ -137,7 +170,6 @@ def run():
     s3_client = build_s3_client()
     ensure_bucket(s3_client, args.bucket)
 
-    # TemporaryDirectory ensures cleanup even on error.
     with tempfile.TemporaryDirectory(prefix="olist_ingest_") as tmp:
         tmp_path  = Path(tmp)
         zip_path  = download_kaggle_dataset_zip(args.dataset, args.timeout_sec, tmp_path)

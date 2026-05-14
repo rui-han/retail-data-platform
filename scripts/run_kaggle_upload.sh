@@ -3,7 +3,6 @@ set -euo pipefail
 
 # ── Load .env if present ──────────────────────────────────────────────────────
 if [[ -f .env ]]; then
-  # Export only non-comment, non-empty KEY=VALUE lines.
   set -a
   # shellcheck disable=SC1091
   source <(grep -E '^\s*[^#][^=]*=.*' .env)
@@ -27,9 +26,9 @@ for env_name in "${required_env_vars[@]}"; do
   fi
 done
 
-echo "Running Olist ingest: DATASET=${DATASET} BUCKET=${BUCKET} PREFIX=${PREFIX}"
+echo "Running Kaggle upload: DATASET=${DATASET} BUCKET=${BUCKET} PREFIX=${PREFIX}"
 
-python jobs/ingestion/ingest_olist.py \
+python jobs/ingestion/kaggle_upload.py \
   --dataset     "${DATASET}" \
   --bucket      "${BUCKET}" \
   --prefix      "${PREFIX}" \
